@@ -5,7 +5,7 @@ module Hourglass::QueryBase
     self.queried_class = name.gsub('Query', '').constantize
 
     # copied from issue query, without the view_issues right check
-    scope :visible, lambda { |*args|
+    scope :visible, lambda {|*args|
       user = args.shift || User.current
       scope = joins("LEFT OUTER JOIN #{Project.table_name} ON #{table_name}.project_id = #{Project.table_name}.id").
           where("#{table_name}.project_id IS NULL")
@@ -34,6 +34,26 @@ module Hourglass::QueryBase
     def set_available_columns(columns)
       self.available_columns = columns.map do |name, options|
         QueryColumn.new name, options
+      end
+    end
+
+    def sql_timezoned_date(column_name)
+      stored = Rails.configuration.active_record.default_timezone
+      if stored == :utc
+        target = User.current.time_zone
+        case User.connection.adapter_name
+        when 'PostgreSQL'
+          "DATE(#{column_name}::TIMESTAMPTZ AT TIME ZONE INTERVAL '#{target.formatted_offset}'::INTERVAL)"
+        when 'SQLite'
+          s = target.utc_offset
+          "DATE(#{column_name}, '#{s > 0 ? '+' : '-'}#{s.abs} seconds')" # utc -> localtime
+        when 'Mysql2', 'MySQL'
+          "DATE(CONVERT_TZ(#{column_name}, '+00:00', '#{target.formatted_offset}'))"
+        else
+          "DATE(#{column_name})" # unknown / no conversion
+        end
+      else
+        "DATE(#{column_name}" # you store time_zoned date for a reason
       end
     end
   end
@@ -108,30 +128,31 @@ module Hourglass::QueryBase
     sql_for_field(field, operator, value, queried_class.table_name, 'start')
   end
 
-  def sql_for_field(field, operator, value, db_table, db_field, is_custom_filter=false)
+  def sql_for_field(field, operator, value, db_table, db_field, is_custom_filter = false)
     sql = ''
     case operator
-      when 'w+lw'
-        # = this and last week
-        first_day_of_week = l(:general_first_day_of_week).to_i
-        day_of_week = Date.today.cwday
-        days_ago = (day_of_week >= first_day_of_week ? day_of_week - first_day_of_week : day_of_week + 7 - first_day_of_week)
-        sql = relative_date_clause(db_table, db_field, -days_ago - 7, -days_ago + 6, is_custom_filter)
-      when 'q'
-        # = current quarter
-        date = User.current.today
-        sql = date_clause(db_table, db_field, date.beginning_of_quarter, date.end_of_quarter, is_custom_filter)
-      when 'lq'
-        # = last quarter
-        date = User.current.today - 3.months
-        sql = date_clause(db_table, db_field, date.beginning_of_quarter, date.end_of_quarter, is_custom_filter)
-      else
-        sql = super
+    when 'w+lw'
+      # = this and last week
+      first_day_of_week = l(:general_first_day_of_week).to_i
+      day_of_week = Date.today.cwday
+      days_ago = (day_of_week >= first_day_of_week ? day_of_week - first_day_of_week : day_of_week + 7 - first_day_of_week)
+      sql = relative_date_clause(db_table, db_field, -days_ago - 7, -days_ago + 6, is_custom_filter)
+    when 'q'
+      # = current quarter
+      date = User.current.today
+      sql = date_clause(db_table, db_field, date.beginning_of_quarter, date.end_of_quarter, is_custom_filter)
+    when 'lq'
+      # = last quarter
+      date = User.current.today - 3.months
+      sql = date_clause(db_table, db_field, date.beginning_of_quarter, date.end_of_quarter, is_custom_filter)
+    else
+      sql = super
     end
     sql
   end
 
   private
+
   def add_date_filter
     add_available_filter 'date', type: :date
   end
@@ -155,10 +176,10 @@ module Hourglass::QueryBase
     end
     principals.uniq!
     principals.sort!
-    users = principals.select { |p| p.is_a?(User) }
+    users = principals.select {|p| p.is_a?(User)}
     values = []
     values << ["<< #{l(:label_me)} >>", 'me'] if User.current.logged?
-    values += users.collect { |s| [s.name, s.id.to_s] }
+    values += users.collect {|s| [s.name, s.id.to_s]}
     add_available_filter 'user_id', type: :list, values: values if values.any?
   end
 
@@ -173,20 +194,20 @@ module Hourglass::QueryBase
 
   def add_sub_project_filter
     sub_projects = project.descendants.visible.to_a
-    values = sub_projects.collect { |s| [s.name, s.id.to_s] }
+    values = sub_projects.collect {|s| [s.name, s.id.to_s]}
     add_available_filter 'subproject_id', type: :list_subprojects, values: values if values.any?
   end
 
   def add_issue_filter
     issues = Issue.visible.all
-    values = issues.collect { |s| [s.subject, s.id.to_s] }
+    values = issues.collect {|s| [s.subject, s.id.to_s]}
     add_available_filter 'issue_id', type: :list, values: values if values.any?
     add_available_filter 'issue_subject', type: :text if issues.any?
   end
 
   def add_activity_filter
     activities = project ? project.activities : TimeEntryActivity.shared
-    values = activities.map { |a| [a.name, a.id.to_s] }
+    values = activities.map {|a| [a.name, a.id.to_s]}
     add_available_filter 'activity_id', type: :list, values: values if values.any?
   end
 
@@ -196,7 +217,7 @@ module Hourglass::QueryBase
                else
                  Version.visible.to_a
                end
-    values = versions.uniq.sort.collect { |s| ["#{s.project.name} - #{s.name}", s.id.to_s] }
+    values = versions.uniq.sort.collect {|s| ["#{s.project.name} - #{s.name}", s.id.to_s]}
     add_available_filter 'fixed_version_id', type: :list_optional, values: values
   end
 
@@ -207,7 +228,7 @@ module Hourglass::QueryBase
   def sql_for_custom_field(*args)
     result = super
     result.gsub!(/#{queried_table_name}\.(#{has_through_associations.join('|')})_id/) do
-      groupable_columns.select { |c| c.name == Regexp.last_match[1].to_sym }.first.groupable
+      groupable_columns.select {|c| c.name == Regexp.last_match[1].to_sym}.first.groupable
     end
     result
   end
